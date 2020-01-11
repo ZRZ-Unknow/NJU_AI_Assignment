@@ -44,7 +44,7 @@ EMPTY_BOARD = np.zeros([N, N], dtype=np.int8)
 def _check_bounds(c):
     return 0 <= c[0] < N and 0 <= c[1] < N
 
-
+# 邻居和对角线，filter函数用于过滤不符合条件的
 NEIGHBORS = {(x, y): list(filter(_check_bounds, [
     (x+1, y), (x-1, y), (x, y+1), (x, y-1)])) for x, y in ALL_COORDS}
 DIAGONALS = {(x, y): list(filter(_check_bounds, [
@@ -134,7 +134,7 @@ def is_eyeish(board, c):
     else:
         return color
 
-
+# namedtuple有两个参数，第一是tuple的名字，第二是tuple的域，可以通过.域名来访问，但不可修改
 class Group(namedtuple('Group', ['id', 'stones', 'liberties', 'color'])):
     """
     stones: a frozenset of Coordinates belonging to this group
