@@ -98,6 +98,7 @@ class Go(object):
         #     raise('Illegal move!')
         #     exit(1)
         # self.state.play_move(action)
+        #print("调用")
         move = coords.from_flat(action)
         self.__state.play_move(move, mutate=True)
         observations = {"info_state": [], "legal_actions": [], "current_player": []}

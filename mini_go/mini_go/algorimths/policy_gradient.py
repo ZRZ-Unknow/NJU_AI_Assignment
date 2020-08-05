@@ -76,6 +76,7 @@ import collections
 import numpy as np
 import sonnet as snt
 import tensorflow as tf
+import os,random
 
 Transition = collections.namedtuple(
     "Transition", "info_state action reward discount legal_actions_mask")
@@ -94,9 +95,10 @@ class PolicyGradient(object):
                  player_id,
                  info_state_size,
                  num_actions,
+                 cnn_parameters,
+                 hidden_layers_sizes=(128,),
                  loss_str="a2c",
                  loss_class=None,
-                 hidden_layers_sizes=(128,),
                  batch_size=128,
                  critic_learning_rate=0.01,
                  pi_learning_rate=0.001,
@@ -160,7 +162,7 @@ class PolicyGradient(object):
 
         # Placeholders
         self._info_state_ph = tf.placeholder(
-            shape=[None, info_state_size], dtype=tf.float32, name="info_state_ph")
+            shape=[None, info_state_size, info_state_size, 1], dtype=tf.float32, name="info_state_ph")
         self._action_ph = tf.placeholder(
             shape=[None], dtype=tf.int32, name="action_ph")
         self._return_ph = tf.placeholder(
@@ -168,23 +170,41 @@ class PolicyGradient(object):
 
         # Network
         # activate final as we plug logit and qvalue heads afterwards.
-        net_torso = snt.nets.MLP(
-            output_sizes=self._layer_sizes, activate_final=True)
-        torso_out = net_torso(self._info_state_ph)
-        self._policy_logits = snt.Linear(
-            output_size=self._num_actions, name="policy_head")(
-            torso_out)
+        cnn_net = snt.nets.ConvNet2D(output_channels = cnn_parameters[0],
+                                     kernel_shapes = cnn_parameters[1],
+                                     strides = cnn_parameters[2],
+                                     paddings = cnn_parameters[3],
+                                     normalization_ctor=snt.BatchNormV2,
+                                     activate_final=True)
+
+        mlp_net = snt.nets.MLP(output_sizes=self._layer_sizes,activate_final=True)
+
+        policy_head = snt.Linear(output_size=self._num_actions, name="policy_head")
+
+
+        
+        torso_out = mlp_net(tf.layers.flatten(cnn_net(self._info_state_ph,is_training=True)),is_training=True)
+        torso_out_eval = mlp_net(tf.layers.flatten(cnn_net(self._info_state_ph,is_training=False)),is_training=False)
+
+
+        self._policy_logits = policy_head(torso_out)
+        self._policy_logits_eval = policy_head(torso_out_eval)
+
+
         self._policy_probs = tf.nn.softmax(self._policy_logits)
+        self._policy_probs_eval = tf.nn.softmax(self._policy_logits_eval)
 
         # Add baseline (V) head for A2C.
+
+        # ! 显示对使用的网络进行赋值,方便后续保存.
         if loss_class.__name__ == "BatchA2CLoss":
-            self._baseline = tf.squeeze(
-                snt.Linear(output_size=1, name="baseline")(torso_out), axis=1)
+            value_head = snt.Linear(output_size=1, name="baseline")
+            self._baseline = tf.squeeze(value_head(torso_out), axis=1)
         else:
             # Add q-values head otherwise
-            self._q_values = snt.Linear(
-                output_size=self._num_actions, name="q_values_head")(
-                torso_out)
+            value_head = snt.Linear(output_size=self._num_actions, name="q_values_head")
+            self._q_values = value_head(torso_out)
+
 
         # Critic loss
         # Baseline loss in case of A2C
@@ -231,11 +251,49 @@ class PolicyGradient(object):
 
         self._pi_learn_step = minimize_with_clipping(pi_optimizer, self._pi_loss)
 
-    def _act(self, info_state, legal_actions):
+        self.variable_list =  list(cnn_net.variables) + list(mlp_net.variables) + list(policy_head.variables) \
+                                + list(value_head.variables) + critic_optimizer.variables() + pi_optimizer.variables()
+
+        self._saver = tf.train.Saver(var_list = self.variable_list)
+
+    def value_fn(self,time_step, player_id):
+        # FIXME: UNTESTED!
+        player_id = time_step.observations["current_player"]
+
+        info_state = time_step.observations["info_state"][player_id]
+        info_state = np.reshape(info_state,(-1,5,5,1))
+        return self._session.run(
+            self._baseline, feed_dict={self._info_state_ph:info_state}
+        )
+
+    def policy_fn(self,time_step, player_id):
+
+        # print("In a2c, player id:",player_id)
+        # player_id = time_step.observations["current_player"]
+        info_state = time_step.observations["info_state"][player_id]
+        legal_actions = time_step.observations["legal_actions"][player_id]
+        _, probs = self._act(info_state, legal_actions, is_evaluation=True)
+
+        # print([i for i in zip(range(len(probs)),probs)])
+        return [i for i in zip(range(len(probs)),probs)]
+
+    def save(self, checkpoint_root, checkpoint_name):
+        save_prefix = os.path.join(checkpoint_root, checkpoint_name)
+        self._saver.save(sess=self._session, save_path=save_prefix)
+
+    def restore(self, save_path):
+        self._saver.restore(self._session, save_path)
+
+
+    def _act(self, info_state, legal_actions, is_evaluation):
         # make a singleton batch for NN compatibility: [1, info_state_size]
-        info_state = np.reshape(info_state, [1, -1])
-        policy_probs = self._session.run(
-            self._policy_probs, feed_dict={self._info_state_ph: info_state})
+        info_state = np.reshape(info_state, [-1,5,5,1])
+        if is_evaluation:
+            policy_probs = self._session.run(
+                self._policy_probs_eval, feed_dict={self._info_state_ph: info_state})
+        else:
+            policy_probs = self._session.run(
+                self._policy_probs, feed_dict={self._info_state_ph: info_state})
 
         # Remove illegal actions, re-normalize probs
         probs = np.zeros(self._num_actions)
@@ -244,7 +302,7 @@ class PolicyGradient(object):
         action = np.random.choice(len(probs), p=probs)
         return action, probs
 
-    def step(self, time_step, is_evaluation=False):
+    def step(self, time_step, is_evaluation=False, is_rival=False):
         """Returns the action to be taken and updates the network if needed.
 
         Args:
@@ -255,10 +313,18 @@ class PolicyGradient(object):
           A `StepOutput` containing the action probs and chosen action.
         """
         # Act step: don't act at terminal info states or if its not our turn.
+
+        if is_rival:
+            info_state = time_step.observations["info_state"][self.player_id]
+            legal_actions = time_step.observations["legal_actions"][self.player_id]
+            action, probs = self._act(info_state, legal_actions, is_evaluation=True)
+
+            return StepOutput(action=action, probs=probs)
+
         if not time_step.last() and self.player_id == time_step.current_player():
             info_state = time_step.observations["info_state"][self.player_id]
             legal_actions = time_step.observations["legal_actions"][self.player_id]
-            action, probs = self._act(info_state, legal_actions)
+            action, probs = self._act(info_state, legal_actions, is_evaluation)
         else:
             action = None
             probs = []
@@ -348,7 +414,7 @@ class PolicyGradient(object):
         critic_loss, _ = self._session.run(
             [self._critic_loss, self._critic_learn_step],
             feed_dict={
-                self._info_state_ph: self._dataset["info_states"],
+                self._info_state_ph: np.reshape(self._dataset["info_states"],(-1,5,5,1)),
                 self._action_ph: self._dataset["actions"],
                 self._return_ph: self._dataset["returns"],
             })
@@ -365,7 +431,7 @@ class PolicyGradient(object):
         pi_loss, _ = self._session.run(
             [self._pi_loss, self._pi_learn_step],
             feed_dict={
-                self._info_state_ph: self._dataset["info_states"],
+                self._info_state_ph: np.reshape(self._dataset["info_states"],(-1,5,5,1)),
                 self._action_ph: self._dataset["actions"],
                 self._return_ph: self._dataset["returns"],
             })

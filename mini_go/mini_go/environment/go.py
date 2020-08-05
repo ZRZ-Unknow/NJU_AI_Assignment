@@ -1,3 +1,10 @@
+'''
+@Descripttion: 
+@version: 
+@Author: Zhou Renzhe
+@Date: 2020-01-08 19:21:17
+@LastEditTime : 2020-01-12 02:53:09
+'''
 # Copyright 2018 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -86,7 +93,6 @@ def replay_position(position, result):
         yield PositionWithContext(pos, next_move, result)
         pos = pos.play_move(next_move, color=color)
 
-
 def find_reached(board, c):
     color = board[c]
     chain = set([c])
@@ -101,7 +107,6 @@ def find_reached(board, c):
             elif board[n] != color:
                 reached.add(n)
     return chain, reached
-
 
 def is_koish(board, c):
     'Check if c is surrounded on all sides by 1 color, and return that color'
